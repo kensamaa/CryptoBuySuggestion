@@ -3,11 +3,15 @@ import numpy as np
 import requests
 import time
 import ta
+import warnings
 from rich import print
 from rich.table import Table
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+
+# Suppress RuntimeWarnings from numpy (such as invalid value encountered in reduce)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ======== Configuration ========
 SYMBOLS = ["BTCUSDT", "HBARUSDT", "SUIUSDT"]
@@ -16,7 +20,7 @@ CHECK_INTERVAL = 600  # 10 minutes
 RISK_REWARD_RATIO = 2.0
 MAX_RISK_PERCENT = 1.0  # Maximum risk per trade (percentage of account balance)
 ML_LOOKBACK = 100  # Bars for ML training
-ACCOUNT_BALANCE = 10000  # Example account balance for position sizing
+ACCOUNT_BALANCE = 1000  # Example account balance for position sizing
 
 # ======== Data Fetching ========
 def get_binance_data(symbol, interval="15m", limit=200):
@@ -41,11 +45,13 @@ def get_binance_data(symbol, interval="15m", limit=200):
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     df.set_index("timestamp", inplace=True)
     
-    return df.dropna()
+    # Clean the data: replace inf with NaN and drop any rows with NaN values.
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    return df
 
 # ======== Technical Indicators ========
 def calculate_indicators(df):
-    """Calculate technical indicators with error handling"""
+    """Calculate technical indicators with error handling and data cleaning"""
     if df.empty:
         return df
     
@@ -70,12 +76,14 @@ def calculate_indicators(df):
         
         # Volume Indicators
         df["OBV"] = ta.volume.OnBalanceVolumeIndicator(df["close"], df["volume"]).on_balance_volume()
-        
+    
     except Exception as e:
         print(f"[red]Error calculating indicators: {e}[/red]")
         return df
-    
-    return df.dropna()
+
+    # Clean the data: replace any inf values and drop rows with NaNs
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    return df
 
 # ======== Machine Learning Integration ========
 def prepare_ml_data(df):
@@ -85,7 +93,9 @@ def prepare_ml_data(df):
     df['volatility'] = df['close'].rolling(20).std()
     df['volume_change'] = df['volume'].pct_change()
     df['target'] = (df['returns'].shift(-1) > 0).astype(int)
-    return df.dropna()
+    # Clean data after calculations
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    return df
 
 def train_ml_model(df):
     """Train and return ML model with safety checks"""
@@ -114,10 +124,14 @@ def detect_divergence(df):
     bearish_div = (df['price_high'] > df['price_high'].shift(5)) & (df['rsi_high'] < df['rsi_high'].shift(5))
     bullish_div = (df['price_low'] < df['price_low'].shift(5)) & (df['rsi_low'] > df['rsi_low'].shift(5))
     
-    return {
-        "bearish_divergence": bearish_div.iloc[-1],
-        "bullish_divergence": bullish_div.iloc[-1]
-    }
+    # Make sure we have at least one valid value before accessing .iloc[-1]
+    if not df.empty:
+        return {
+            "bearish_divergence": bearish_div.iloc[-1],
+            "bullish_divergence": bullish_div.iloc[-1]
+        }
+    else:
+        return {"bearish_divergence": False, "bullish_divergence": False}
 
 def analyze_market(symbol_data, model_data):
     """Advanced signal detection"""
@@ -231,21 +245,13 @@ def display_signals(all_signals):
         table.add_column(col[0], style=col[1], width=col[2])
     
     # Prepare rows for each metric
-    # Row 1: Current Price (from 15m timeframe)
     price_row = ["Price"]
-    # Row 2: ML Prediction
     ml_row = ["ML Prediction"]
-    # Row 3: Volatility (ATR)
     atr_row = ["Volatility (ATR)"]
-    # Row 4: Signal (Long / Short / No Signal)
     signal_row = ["Signal"]
-    # Row 5: Entry Price
     entry_row = ["Entry Price"]
-    # Row 6: Stop Loss
     sl_row = ["Stop Loss"]
-    # Row 7: Take Profit
     tp_row = ["Take Profit"]
-    # Row 8: Estimated Position Size
     pos_size_row = ["Position Size"]
 
     for symbol in SYMBOLS:
@@ -253,12 +259,10 @@ def display_signals(all_signals):
         tf15 = data["15m"].iloc[-1]
         sig = data["signal"]
         
-        # Current Price, ATR, ML prediction
         price_row.append(f"{tf15['close']:.4f}")
         ml_row.append(f"{sig['ml_prediction']:.2%}")
         atr_row.append(f"{tf15['ATR']:.4f}")
         
-        # Signal string formatting
         if sig["long"]:
             signal_row.append(f"[bold green]LONG ({sig['confidence']:.0f}%)[/bold green]")
         elif sig["short"]:
@@ -266,7 +270,6 @@ def display_signals(all_signals):
         else:
             signal_row.append("[yellow]No Signal[/yellow]")
         
-        # Suggested Entry, Stop Loss, and Take Profit values (if a signal exists)
         if sig["long"] or sig["short"]:
             entry_price = sig["entry_price"]
             stop_loss = sig["stop_loss"]
@@ -274,7 +277,6 @@ def display_signals(all_signals):
             entry_row.append(f"{entry_price:.4f}")
             sl_row.append(f"{stop_loss:.4f}")
             tp_row.append(f"{take_profit:.4f}")
-            # Calculate position size using the dynamic_position_size function
             pos_size = dynamic_position_size(ACCOUNT_BALANCE, entry_price, stop_loss, tf15["ATR"])
             pos_size_row.append(f"{pos_size:.2f}")
         else:
@@ -283,7 +285,6 @@ def display_signals(all_signals):
             tp_row.append("N/A")
             pos_size_row.append("N/A")
     
-    # Add rows to the table
     for row in [price_row, ml_row, atr_row, signal_row, entry_row, sl_row, tp_row, pos_size_row]:
         table.add_row(*row)
     

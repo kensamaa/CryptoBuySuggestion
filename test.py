@@ -18,6 +18,7 @@ RISK_REWARD_RATIO = 2.0      # For take profit calculation
 MAX_RISK_PERCENT = 1.0       # Percent of current capital risked per trade
 ML_LOOKBACK = 100            # Bars to skip initially (warm-up period)
 ROLLING_VOLUME_PERIOD = 20   # Period for rolling volume average
+MIN_SIGNAL_PERCENT = 70      # Minimum signal percentage to take a trade
 
 # ======== Data Fetching ========
 def get_binance_data(symbol, interval="15m", limit=1000):
@@ -72,8 +73,8 @@ def calculate_indicators(df):
 # ======== Signal Detection & Backtest Simulation ========
 def backtest_strategy(df):
     """
-    Loop through the historical data and simulate a trade (either long or short)
-    whenever the strategy conditions are met.
+    Loop through historical data and simulate a trade (either long or short)
+    whenever the strategy conditions are met AND the signal percentage exceeds MIN_SIGNAL_PERCENT.
     """
     capital = INITIAL_CAPITAL
     trades = []
@@ -87,7 +88,7 @@ def backtest_strategy(df):
         if atr <= 0:
             continue  # Skip if ATR is non-positive
 
-        # Calculate conditions for long signals:
+        # ----- LONG SIGNAL CONDITIONS -----
         long_primary_trend_up = row["EMA_21"] > row["EMA_50"]
         long_immediate_trend_up = row["EMA_9"] > row["EMA_21"]
         long_rsi_oversold = row["RSI"] < 35
@@ -101,8 +102,9 @@ def backtest_strategy(df):
             long_macd_bullish,
             volume_spike
         ]
+        long_signal_percent = (sum(long_conditions) / len(long_conditions)) * 100
 
-        # Calculate conditions for short signals (inverse of long conditions):
+        # ----- SHORT SIGNAL CONDITIONS -----
         short_primary_trend_down = row["EMA_21"] < row["EMA_50"]
         short_immediate_trend_down = row["EMA_9"] < row["EMA_21"]
         short_rsi_overbought = row["RSI"] > 65
@@ -115,64 +117,61 @@ def backtest_strategy(df):
             short_macd_bearish,
             volume_spike
         ]
+        short_signal_percent = (sum(short_conditions) / len(short_conditions)) * 100
 
-        # Determine if we have a long or short signal (only one at a time)
+        # Determine trade type if the conditions are strong enough and not ambiguous.
         trade_type = None
-        if sum(long_conditions) >= 4 and sum(short_conditions) < 4:
+        if sum(long_conditions) >= 4 and sum(short_conditions) < 4 and long_signal_percent >= MIN_SIGNAL_PERCENT:
             trade_type = "LONG"
-        elif sum(short_conditions) >= 4 and sum(long_conditions) < 4:
+        elif sum(short_conditions) >= 4 and sum(long_conditions) < 4 and short_signal_percent >= MIN_SIGNAL_PERCENT:
             trade_type = "SHORT"
         else:
-            continue  # Skip if signals are ambiguous or none is strong enough
+            continue  # Skip if neither signal is strong enough
 
         entry_price = row["close"]
 
-        # Define trade parameters based on trade type
+        # Define trade parameters based on trade type.
         if trade_type == "LONG":
             stop_loss = entry_price - atr * 1.5
             take_profit = entry_price + atr * RISK_REWARD_RATIO
-            # Risk per unit is the difference between entry and stop (long direction)
-            risk_per_unit = entry_price - stop_loss  
+            risk_per_unit = entry_price - stop_loss  # dollars risked per unit (long)
+            signal_percentage = long_signal_percent
         else:  # SHORT
             stop_loss = entry_price + atr * 1.5
             take_profit = entry_price - atr * RISK_REWARD_RATIO
-            # For short trades, risk per unit is the difference between stop and entry
-            risk_per_unit = stop_loss - entry_price  
+            risk_per_unit = stop_loss - entry_price  # dollars risked per unit (short)
+            signal_percentage = short_signal_percent
 
         if risk_per_unit == 0:
             continue
 
-        # Determine position size based on risk (risking MAX_RISK_PERCENT of current capital)
+        # Determine position size based on risk (risking MAX_RISK_PERCENT of current capital).
         risk_amount = capital * (MAX_RISK_PERCENT / 100)
         position_size = risk_amount / risk_per_unit
 
-        # Simulate the trade outcome by scanning forward:
+        # Simulate trade outcome by scanning forward until stop loss or take profit is hit.
         trade_outcome = None
         exit_price = None
         exit_index = None
         for j in range(i+1, len(df)):
             trade_row = df.iloc[j]
             if trade_type == "LONG":
-                # For a long trade, if the low hits or goes below stop loss, it's a loss.
                 if trade_row["low"] <= stop_loss:
                     trade_outcome = "loss"
                     exit_price = stop_loss
                     exit_index = j
                     break
-                # If the high reaches or exceeds the take profit, it's a win.
                 elif trade_row["high"] >= take_profit:
                     trade_outcome = "win"
                     exit_price = take_profit
                     exit_index = j
                     break
             else:  # SHORT trade
-                # For a short trade, if the high hits or goes above stop loss, it's a loss.
                 if trade_row["high"] >= stop_loss:
                     trade_outcome = "loss"
                     exit_price = stop_loss
                     exit_index = j
                     break
-                # If the low reaches or falls below the take profit, it's a win.
                 elif trade_row["low"] <= take_profit:
                     trade_outcome = "win"
                     exit_price = take_profit
@@ -182,10 +181,10 @@ def backtest_strategy(df):
         if trade_outcome is None:
             continue
 
-        # Calculate profit in dollars for this trade:
+        # Calculate profit (for long, profit = exit - entry; for short, profit = entry - exit).
         if trade_type == "LONG":
             profit = (exit_price - entry_price) * position_size
-        else:  # SHORT
+        else:
             profit = (entry_price - exit_price) * position_size
 
         if profit >= 0:
@@ -203,7 +202,8 @@ def backtest_strategy(df):
             "exit_price": exit_price,
             "profit": profit,
             "capital_after_trade": capital,
-            "outcome": trade_outcome
+            "outcome": trade_outcome,
+            "signal_percentage": signal_percentage
         })
 
     return trades, win_count, loss_count, capital
@@ -227,7 +227,7 @@ def display_results(trades, wins, losses, final_capital):
 
     console.print(summary_table)
 
-    # Detailed trades table
+    # Detailed trades table.
     trades_table = Table(title="Trades Detail", style="bold blue")
     trades_table.add_column("Type", justify="center")
     trades_table.add_column("Entry Index", justify="right")
@@ -236,6 +236,7 @@ def display_results(trades, wins, losses, final_capital):
     trades_table.add_column("Exit Price", justify="right")
     trades_table.add_column("Profit", justify="right")
     trades_table.add_column("Outcome", justify="center")
+    trades_table.add_column("Signal %", justify="right")
 
     for trade in trades:
         trades_table.add_row(
@@ -245,7 +246,8 @@ def display_results(trades, wins, losses, final_capital):
             f"{trade['entry_price']:.2f}",
             f"{trade['exit_price']:.2f}",
             f"{trade['profit']:.2f}",
-            trade["outcome"].upper()
+            trade["outcome"].upper(),
+            f"{trade['signal_percentage']:.2f}%"
         )
     
     console.print(trades_table)
@@ -259,9 +261,7 @@ def main():
         return
 
     df = calculate_indicators(df)
-    
     trades, wins, losses, final_capital = backtest_strategy(df)
-    
     display_results(trades, wins, losses, final_capital)
 
 if __name__ == "__main__":
