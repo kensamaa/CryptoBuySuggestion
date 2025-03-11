@@ -5,6 +5,7 @@ import time
 import ta
 import warnings
 import logging
+import random
 from rich import print
 from rich.table import Table
 from datetime import datetime
@@ -20,6 +21,9 @@ import threading
 # Flask & JSON for Dashboard
 from flask import Flask, jsonify, render_template_string
 
+# Plotly for interactive coin charts
+import plotly.graph_objects as go
+
 # Suppress RuntimeWarnings from numpy
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -31,14 +35,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======== Global Configuration ========
-SYMBOLS = ["BTCUSDT", "HBARUSDT", "SEIUSDT"]
+SYMBOLS = ["BTCUSDT", "HBARUSDT", "SUIUSDT"]
 TIMEFRAMES = ["15m", "30m", "1h"]
 CHECK_INTERVAL = 600         # seconds (10 minutes)
 RETRAIN_INTERVAL = 3600      # seconds (1 hour)
 RISK_REWARD_RATIO = 2.0
 MAX_RISK_PERCENT = 1.0       # percent risk per trade
 ML_LOOKBACK = 100            # bars for ML training
-ACCOUNT_BALANCE = 1000       # account balance example
+ACCOUNT_BALANCE = 1000       # example account balance
 
 # Global storage for dashboard data
 dashboard_data: Dict[str, Any] = {}
@@ -139,9 +143,15 @@ perf_tracker = PerformanceTracker(initial_balance=10000)
 # ======== Flask Dashboard Setup ==========
 app = Flask(__name__)
 
-@app.route("/")
-def dashboard():
-    html = """
+def generate_dashboard_html():
+    # Generate nav tabs for coin charts
+    nav_tabs = ""
+    tab_content = ""
+    for s in SYMBOLS:
+        nav_tabs += f'<li class="nav-item"><a class="nav-link" id="{s}-tab" data-toggle="tab" href="#{s}" role="tab">{s}</a></li>'
+        tab_content += f'<div class="tab-pane fade" id="{s}" role="tabpanel"><div id="chart-{s}" style="width:100%;height:400px;"></div></div>'
+
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -149,72 +159,85 @@ def dashboard():
       <!-- Bootstrap CSS -->
       <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
       <style>
-        body { background-color: #f8f9fa; }
-        h1 { margin-top: 20px; }
-        .table thead th { background-color: #343a40; color: white; }
-        .card { margin-bottom: 20px; }
+        body {{ background-color: #f8f9fa; }}
+        h1 {{ margin-top: 20px; }}
+        .table thead th {{ background-color: #343a40; color: white; }}
+        .card {{ margin-bottom: 20px; }}
       </style>
-      <!-- Chart.js -->
+      <!-- Chart.js for equity curve -->
       <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+      <!-- Plotly JS for coin charts -->
+      <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
       <script>
-      async function fetchData() {
+      async function fetchData() {{
           const response = await fetch('/api/data');
           const data = await response.json();
           let tableBody = '';
-          for (let symbol in data) {
+          for (let symbol in data) {{
               let row = data[symbol];
               tableBody += `<tr>
-                  <td>${symbol}</td>
-                  <td>${row.price !== null ? row.price : 'N/A'}</td>
-                  <td>${row.ml_prediction !== null ? (row.ml_prediction * 100).toFixed(2) + '%' : 'N/A'}</td>
-                  <td>${row.avg_ml_prediction !== null ? (row.avg_ml_prediction * 100).toFixed(2) + '%' : 'N/A'}</td>
-                  <td>${row.atr !== null ? row.atr : 'N/A'}</td>
-                  <td>${row.signal !== null ? row.signal : 'N/A'}</td>
-                  <td>${row.entry_price !== null ? row.entry_price : 'N/A'}</td>
-                  <td>${row.stop_loss !== null ? row.stop_loss : 'N/A'}</td>
-                  <td>${row.take_profit !== null ? row.take_profit : 'N/A'}</td>
-                  <td>${row.position_size !== null ? row.position_size : 'N/A'}</td>
+                  <td>${{symbol}}</td>
+                  <td>${{row.price !== null ? row.price : 'N/A'}}</td>
+                  <td>${{row.ml_prediction !== null ? (row.ml_prediction * 100).toFixed(2) + '%' : 'N/A'}}</td>
+                  <td>${{row.avg_ml_prediction !== null ? (row.avg_ml_prediction * 100).toFixed(2) + '%' : 'N/A'}}</td>
+                  <td>${{row.atr !== null ? row.atr : 'N/A'}}</td>
+                  <td>${{row.signal !== null ? row.signal : 'N/A'}}</td>
+                  <td>${{row.entry_price !== null ? row.entry_price : 'N/A'}}</td>
+                  <td>${{row.stop_loss !== null ? row.stop_loss : 'N/A'}}</td>
+                  <td>${{row.take_profit !== null ? row.take_profit : 'N/A'}}</td>
+                  <td>${{row.position_size !== null ? row.position_size : 'N/A'}}</td>
+                  <td>P:${{row.pivot !== null ? row.pivot : 'N/A'}} S:${{row.support !== null ? row.support : 'N/A'}} R:${{row.resistance !== null ? row.resistance : 'N/A'}}</td>
               </tr>`;
-          }
+          }}
           document.getElementById('data-table-body').innerHTML = tableBody;
-      }
+      }}
       
-      async function fetchEquity() {
+      async function fetchEquity() {{
           const response = await fetch('/api/equity');
           const equityData = await response.json();
           const ctx = document.getElementById('equityChart').getContext('2d');
-          if (window.myChart) {
+          if (window.myChart) {{
               window.myChart.data.labels = equityData.map((_, index) => index);
               window.myChart.data.datasets[0].data = equityData;
               window.myChart.update();
-          } else {
-              window.myChart = new Chart(ctx, {
+          }} else {{
+              window.myChart = new Chart(ctx, {{
                   type: 'line',
-                  data: {
+                  data: {{
                       labels: equityData.map((_, index) => index),
-                      datasets: [{
+                      datasets: [{{
                           label: 'Equity Curve',
                           data: equityData,
                           borderColor: 'rgba(75, 192, 192, 1)',
                           backgroundColor: 'rgba(75, 192, 192, 0.2)',
                           fill: true,
                           tension: 0.1
-                      }]
-                  },
-                  options: {
-                      scales: {
-                          x: { title: { display: true, text: 'Trades' } },
-                          y: { title: { display: true, text: 'Portfolio Value' } }
-                      }
-                  }
-              });
-          }
-      }
+                      }}]
+                  }},
+                  options: {{
+                      scales: {{
+                          x: {{ title: {{ display: true, text: 'Trades' }} }},
+                          y: {{ title: {{ display: true, text: 'Portfolio Value' }} }}
+                      }}
+                  }}
+              }});
+          }}
+      }}
       
-      function refreshDashboard() {
+      async function fetchCoinChart(symbol) {{
+          const response = await fetch(`/api/chart/${{symbol}}`);
+          const chartData = await response.json();
+          Plotly.newPlot('chart-' + symbol, chartData.data, chartData.layout);
+      }}
+      
+      function refreshDashboard() {{
           fetchData();
           fetchEquity();
-      }
+          const symbols = {SYMBOLS};
+          symbols.forEach(symbol => {{
+              fetchCoinChart(symbol);
+          }});
+      }}
       
       setInterval(refreshDashboard, 10000);
       window.onload = refreshDashboard;
@@ -247,6 +270,7 @@ def dashboard():
                   <th>Stop Loss</th>
                   <th>Take Profit</th>
                   <th>Position Size</th>
+                  <th>P/S/R</th>
                 </tr>
               </thead>
               <tbody id="data-table-body">
@@ -254,11 +278,53 @@ def dashboard():
             </table>
           </div>
         </div>
+        
+        <!-- Coin Charts -->
+        <div class="card">
+          <div class="card-body">
+            <h3>Coin Charts</h3>
+            <ul class="nav nav-tabs" id="chartTabs" role="tablist">
+              {nav_tabs}
+            </ul>
+            <div class="tab-content" id="chartTabsContent">
+              {tab_content}
+            </div>
+          </div>
+        </div>
+        
+        <!-- Explanation Section -->
+        <div class="card">
+          <div class="card-body">
+            <h3>Bot Workflow & Signal Criteria</h3>
+            <p>
+              <strong>Signal Criteria:</strong> The bot uses a weighted consensus from 15m, 30m, and 1h timeframes.
+              Longer timeframes (1h) are given higher weight for trend confirmation while shorter timeframes (15m) are used for entry timing.
+              Conditions include EMA crossovers, RSI thresholds, MACD signals, divergence with volume confirmation, and volume spikes.
+            </p>
+            <p>
+              <strong>ML Prediction & Volatility:</strong> An ML model (trained on 15m data) predicts the probability of price increase.
+              The average ML prediction is factored into the final signal. Volatility is measured via ATR, which influences position sizing, stop loss, and take profit.
+            </p>
+            <p>
+              <strong>Bot Workflow:</strong> The bot fetches multi-timeframe data, computes technical indicators (including pivot levels, support/resistance, divergence),
+              and then combines these with ML predictions using a weighted consensus to generate trading signals.
+              Simulated trades are executed based on these signals, and the portfolio (equity curve) is updated accordingly.
+            </p>
+          </div>
+        </div>
       </div>
+      
+      <!-- Bootstrap JS and dependencies -->
+      <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
     </body>
     </html>
     """
-    return render_template_string(html)
+    return html
+
+@app.route("/")
+def dashboard():
+    return render_template_string(generate_dashboard_html())
 
 @app.route("/api/data")
 def api_data():
@@ -268,6 +334,34 @@ def api_data():
 def api_equity():
     # Return the equity curve from the performance tracker
     return jsonify(perf_tracker.equity_curve)
+
+@app.route("/api/chart/<symbol>")
+def api_chart(symbol):
+    # Fetch 15m data for the symbol and generate a Plotly candlestick chart with support/resistance and a marker for the current signal
+    session = requests.Session()
+    df = get_binance_data(symbol, "15m", limit=200, session=session)
+    if df is None or df.empty:
+        return jsonify({})
+    df = calculate_indicators(df)
+    pivot_levels = get_pivot_levels(df)
+    fig = go.Figure(data=[go.Candlestick(x=df.index,
+                                         open=df['open'],
+                                         high=df['high'],
+                                         low=df['low'],
+                                         close=df['close'],
+                                         name="Price")])
+    # Add support/resistance lines
+    fig.add_hline(y=pivot_levels["pivot"], line_dash="dash", annotation_text="Pivot", annotation_position="bottom right")
+    fig.add_hline(y=pivot_levels["support"], line_dash="dot", annotation_text="Support", annotation_position="bottom right")
+    fig.add_hline(y=pivot_levels["resistance"], line_dash="dot", annotation_text="Resistance", annotation_position="top right")
+    # Add buy/sell marker if signal exists
+    sig = dashboard_data.get(symbol, {})
+    if sig and sig.get("signal") in ["LONG", "SHORT"]:
+        marker_color = "green" if sig.get("signal") == "LONG" else "red"
+        fig.add_trace(go.Scatter(x=[df.index[-1]], y=[sig.get("entry_price", df['close'].iloc[-1])],
+                                 mode="markers", marker=dict(color=marker_color, size=12),
+                                 name=f"{sig.get('signal')} Entry"))
+    return fig.to_json()
 
 def run_dashboard():
     app.run(host="0.0.0.0", port=5000)
@@ -319,6 +413,14 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
     return df
+
+def get_pivot_levels(df: pd.DataFrame) -> Dict[str, float]:
+    # Compute pivot point, support and resistance from the last row
+    last_row = df.iloc[-1]
+    pivot = (last_row['high'] + last_row['low'] + last_row['close']) / 3
+    resistance = (2 * pivot) - last_row['low']
+    support = (2 * pivot) - last_row['high']
+    return {"pivot": pivot, "support": support, "resistance": resistance}
 
 # ======== Machine Learning Integration ========
 def train_ml_model(df: pd.DataFrame) -> Tuple[CalibratedClassifierCV, StandardScaler]:
@@ -379,105 +481,102 @@ def prepare_ml_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
     return df
 
-# ======== Signal Detection ========
+# ======== Signal Detection & Weighted Consensus ========
 def detect_divergence(df: pd.DataFrame) -> Dict[str, bool]:
     df = df.copy()
     df['price_high'] = df['high'].rolling(5).max()
     df['price_low'] = df['low'].rolling(5).min()
-    df['rsi_high'] = df['RSI'].rolling(5).max()
-    df['rsi_low'] = df['RSI'].rolling(5).min()
-    bearish_div = (df['price_high'] > df['price_high'].shift(5)) & (df['rsi_high'] < df['rsi_high'].shift(5))
-    bullish_div = (df['price_low'] < df['price_low'].shift(5)) & (df['rsi_low'] > df['rsi_low'].shift(5))
-    if not df.empty:
-        return {
-            "bearish_divergence": bool(bearish_div.iloc[-1]),
-            "bullish_divergence": bool(bullish_div.iloc[-1])
-        }
-    return {"bearish_divergence": False, "bullish_divergence": False}
+    volume_mean = df['volume'].rolling(5).mean().iloc[-1]
+    # Basic divergence using current vs. shifted RSI and price highs/lows with volume confirmation
+    bearish_div = (df['price_high'] > df['price_high'].shift(5)) & (df['RSI'] < df['RSI'].shift(5))
+    bullish_div = (df['price_low'] < df['price_low'].shift(5)) & (df['RSI'] > df['RSI'].shift(5))
+    bearish_confirm = bearish_div.iloc[-1] and (df['volume'].iloc[-1] > volume_mean * 1.5)
+    bullish_confirm = bullish_div.iloc[-1] and (df['volume'].iloc[-1] > volume_mean * 1.5)
+    return {
+        "bearish_divergence": bool(bearish_confirm),
+        "bullish_divergence": bool(bullish_confirm)
+    }
 
 def analyze_market(symbol_data: Dict[str, Any], model_data: Dict[str, Any]) -> Dict[str, Any]:
-    signals = {
-        "long": False, "short": False,
-        "entry_price": None, "stop_loss": None,
-        "take_profit": None, "confidence": 0,
-        "ml_prediction": 0
-    }
+    # Weighted consensus: assign weights to each timeframe
+    timeframe_weights = {"15m": 0.5, "30m": 0.75, "1h": 1.0}
+    long_score = 0.0
+    short_score = 0.0
+    ml_preds = []
+    for tf in TIMEFRAMES:
+        if tf not in symbol_data:
+            continue
+        df = symbol_data[tf]
+        latest = df.iloc[-1]
+        weight = timeframe_weights.get(tf, 1)
+        # Long conditions
+        trend_long = latest["EMA_21"] > latest["EMA_50"]
+        immediate_long = (latest["EMA_9"] > latest["EMA_21"]) and (latest["RSI"] < 35) and (latest["MACD"] > latest["MACD_Signal"])
+        volume_spike = latest["volume"] > df["volume"].rolling(20).mean().iloc[-1] * 1.5
+        divergence = detect_divergence(df)
+        bullish_div = divergence["bullish_divergence"]
+        # Short conditions
+        trend_short = latest["EMA_21"] < latest["EMA_50"]
+        immediate_short = (latest["EMA_9"] < latest["EMA_21"]) and (latest["RSI"] > 65) and (latest["MACD"] < latest["MACD_Signal"])
+        bearish_div = divergence["bearish_divergence"]
+        
+        if trend_long:
+            long_score += weight * 1
+        if immediate_long:
+            long_score += weight * 1
+        if bullish_div:
+            long_score += weight * 0.5
+        if volume_spike:
+            long_score += weight * 0.5
+
+        if trend_short:
+            short_score += weight * 1
+        if immediate_short:
+            short_score += weight * 1
+        if bearish_div:
+            short_score += weight * 0.5
+        if volume_spike:
+            short_score += weight * 0.5
+
+        # Use ML prediction from 15m if available
+        if tf == "15m" and model_data:
+            try:
+                ml_df = prepare_ml_data(df.copy())
+                if len(ml_df) > ML_LOOKBACK:
+                    model, scaler = model_data["model"], model_data["scaler"]
+                    features = scaler.transform(ml_df[['returns', 'volatility', 'volume_change', 'RSI', 'MACD']].iloc[-1:])
+                    ml_pred = model.predict_proba(features)[0][1]
+                    ml_preds.append(ml_pred)
+            except Exception as e:
+                logger.error(f"ML prediction error for {tf}: {e}")
     
-    df_15m = symbol_data["15m"]
-    df_30m = symbol_data["30m"]
-    df_1h = symbol_data["1h"]
-    
-    tf15 = df_15m.iloc[-1]
-    tf30 = df_30m.iloc[-1]
-    tf1h = df_1h.iloc[-1]
-    
-    divergence = detect_divergence(df_15m)
-    
-    ml_df = prepare_ml_data(df_15m.copy())
-    if len(ml_df) > ML_LOOKBACK and model_data:
-        try:
-            model, scaler = model_data["model"], model_data["scaler"]
-            features = scaler.transform(ml_df[['returns', 'volatility', 'volume_change', 'RSI', 'MACD']].iloc[-1:])
-            ml_pred = model.predict_proba(features)[0][1]
-        except Exception as e:
-            logger.error(f"ML prediction error: {e}")
-            ml_pred = 0.5
-    else:
-        ml_pred = 0.5
-    
-    primary_trend_up = tf1h["EMA_21"] > tf1h["EMA_50"]
-    secondary_trend_up = tf30["EMA_21"] > tf30["EMA_50"]
-    immediate_trend_up = tf15["EMA_9"] > tf15["EMA_21"]
-    rsi_oversold = tf15["RSI"] < 35
-    rsi_overbought = tf15["RSI"] > 65
-    macd_bullish = tf15["MACD"] > tf15["MACD_Signal"]
-    volume_spike = (tf15["volume"] > df_15m["volume"].rolling(20).mean().iloc[-1] * 1.5)
-    
-    long_conditions = [
-        primary_trend_up,
-        secondary_trend_up,
-        immediate_trend_up,
-        macd_bullish,
-        rsi_oversold,
-        volume_spike,
-        divergence["bullish_divergence"],
-        ml_pred > 0.6
-    ]
-    
-    short_conditions = [
-        not primary_trend_up,
-        not secondary_trend_up,
-        not immediate_trend_up,
-        not macd_bullish,
-        rsi_overbought,
-        volume_spike,
-        divergence["bearish_divergence"],
-        ml_pred < 0.4
-    ]
-    
-    long_score = sum(long_conditions)
-    short_score = sum(short_conditions)
-    
-    if long_score >= 5:
-        signals.update({
+    avg_ml_pred = np.mean(ml_preds) if ml_preds else 0.5
+    long_score += avg_ml_pred * 2
+    short_score += (1 - avg_ml_pred) * 2
+
+    threshold = 2.5
+    if long_score >= threshold and long_score > short_score:
+        signal = {
             "long": True,
-            "entry_price": tf15["close"],
-            "stop_loss": tf15["close"] - (tf15["ATR"] * 1.5),
-            "take_profit": tf15["close"] + (tf15["ATR"] * RISK_REWARD_RATIO),
-            "confidence": min(100, long_score * 15 + ml_pred * 20),
-            "ml_prediction": ml_pred
-        })
-    elif short_score >= 5:
-        signals.update({
+            "entry_price": symbol_data["15m"].iloc[-1]["close"],
+            "stop_loss": symbol_data["15m"].iloc[-1]["close"] - (symbol_data["15m"].iloc[-1]["ATR"] * 1.5),
+            "take_profit": symbol_data["15m"].iloc[-1]["close"] + (symbol_data["15m"].iloc[-1]["ATR"] * RISK_REWARD_RATIO),
+            "confidence": min(100, long_score * 15),
+            "ml_prediction": avg_ml_pred
+        }
+    elif short_score >= threshold and short_score > long_score:
+        signal = {
             "short": True,
-            "entry_price": tf15["close"],
-            "stop_loss": tf15["close"] + (tf15["ATR"] * 1.5),
-            "take_profit": tf15["close"] - (tf15["ATR"] * RISK_REWARD_RATIO),
-            "confidence": min(100, short_score * 15 + (1 - ml_pred) * 20),
-            "ml_prediction": ml_pred
-        })
+            "entry_price": symbol_data["15m"].iloc[-1]["close"],
+            "stop_loss": symbol_data["15m"].iloc[-1]["close"] + (symbol_data["15m"].iloc[-1]["ATR"] * 1.5),
+            "take_profit": symbol_data["15m"].iloc[-1]["close"] - (symbol_data["15m"].iloc[-1]["ATR"] * RISK_REWARD_RATIO),
+            "confidence": min(100, short_score * 15),
+            "ml_prediction": avg_ml_pred
+        }
+    else:
+        signal = {"long": False, "short": False, "ml_prediction": avg_ml_pred}
     
-    return signals
+    return signal
 
 def dynamic_position_size(account_balance: float, entry_price: float, stop_loss: float, atr: float) -> float:
     risk_amount = account_balance * (MAX_RISK_PERCENT / 100)
@@ -487,80 +586,6 @@ def dynamic_position_size(account_balance: float, entry_price: float, stop_loss:
     atr_multiplier = max(0.5, min(2.0, 1.5 / (atr / entry_price)))
     return (risk_amount / risk_per_share) * atr_multiplier
 
-def display_signals(all_signals: Dict[str, Any],
-                    prediction_history: Dict[str, deque]) -> None:
-    table = Table(title="\n🚀 Trading Signals", show_header=True, header_style="bold magenta")
-    columns = [
-        ("Metric", "cyan", 22),
-        ("BTC", "green", 25),
-        ("HBAR", "green", 25),
-        ("SEI", "green", 25)
-    ]
-    for col in columns:
-        table.add_column(col[0], style=col[1], width=col[2])
-    
-    price_row = ["Price"]
-    ml_row = ["ML Prediction"]
-    avg_ml_row = ["Avg ML Prediction"]
-    atr_row = ["Volatility (ATR)"]
-    signal_row = ["Signal"]
-    entry_row = ["Entry Price"]
-    sl_row = ["Stop Loss"]
-    tp_row = ["Take Profit"]
-    pos_size_row = ["Position Size"]
-
-    for symbol in SYMBOLS:
-        data = all_signals.get(symbol, {})
-        tf15 = data.get("15m")
-        sig = data.get("signal", {})
-        if tf15 is None or not sig:
-            price_row.append("N/A")
-            ml_row.append("N/A")
-            avg_ml_row.append("N/A")
-            atr_row.append("N/A")
-            signal_row.append("N/A")
-            entry_row.append("N/A")
-            sl_row.append("N/A")
-            tp_row.append("N/A")
-            pos_size_row.append("N/A")
-            continue
-        
-        tf15_last = tf15.iloc[-1]
-        price_row.append(f"{tf15_last['close']:.4f}")
-        ml_value = sig.get("ml_prediction", 0)
-        ml_row.append(f"{ml_value:.2%}")
-        history = prediction_history.get(symbol, [])
-        avg_ml = np.mean(history) if history else 0
-        avg_ml_row.append(f"{avg_ml:.2%}")
-        atr_row.append(f"{tf15_last['ATR']:.4f}")
-        
-        if sig.get("long"):
-            signal_row.append(f"[bold green]LONG ({sig.get('confidence', 0):.0f}%)[/bold green]")
-        elif sig.get("short"):
-            signal_row.append(f"[bold red]SHORT ({sig.get('confidence', 0):.0f}%)[/bold red]")
-        else:
-            signal_row.append("[yellow]No Signal[/yellow]")
-        
-        if sig.get("long") or sig.get("short"):
-            entry_price = sig.get("entry_price", 0)
-            stop_loss = sig.get("stop_loss", 0)
-            take_profit = sig.get("take_profit", 0)
-            entry_row.append(f"{entry_price:.4f}")
-            sl_row.append(f"{stop_loss:.4f}")
-            tp_row.append(f"{take_profit:.4f}")
-            pos_size = dynamic_position_size(ACCOUNT_BALANCE, entry_price, stop_loss, tf15_last["ATR"])
-            pos_size_row.append(f"{pos_size:.2f}")
-        else:
-            entry_row.append("N/A")
-            sl_row.append("N/A")
-            tp_row.append("N/A")
-            pos_size_row.append("N/A")
-    
-    for row in [price_row, ml_row, avg_ml_row, atr_row, signal_row, entry_row, sl_row, tp_row, pos_size_row]:
-        table.add_row(*row)
-    
-    print(table)
-
 def update_dashboard(processed_signals: Dict[str, Any], prediction_history: Dict[str, deque]) -> None:
     global dashboard_data
     new_data = {}
@@ -568,6 +593,9 @@ def update_dashboard(processed_signals: Dict[str, Any], prediction_history: Dict
         data = processed_signals.get(symbol, {})
         tf15 = data.get("15m")
         sig = data.get("signal", {})
+        support_resistance = {"pivot": None, "support": None, "resistance": None}
+        if "1h" in data and not data["1h"].empty:
+            support_resistance = get_pivot_levels(data["1h"])
         if tf15 is None or not sig:
             new_data[symbol] = {
                 "price": None,
@@ -578,10 +606,12 @@ def update_dashboard(processed_signals: Dict[str, Any], prediction_history: Dict
                 "entry_price": None,
                 "stop_loss": None,
                 "take_profit": None,
-                "position_size": None
+                "position_size": None,
+                "pivot": support_resistance["pivot"],
+                "support": support_resistance["support"],
+                "resistance": support_resistance["resistance"]
             }
             continue
-        
         tf15_last = tf15.iloc[-1]
         price = tf15_last["close"]
         ml_prediction = sig.get("ml_prediction", 0)
@@ -593,7 +623,6 @@ def update_dashboard(processed_signals: Dict[str, Any], prediction_history: Dict
         stop_loss = sig.get("stop_loss")
         take_profit = sig.get("take_profit")
         pos_size = dynamic_position_size(ACCOUNT_BALANCE, entry_price, stop_loss, atr) if (sig.get("long") or sig.get("short")) else None
-
         new_data[symbol] = {
             "price": round(price, 4),
             "ml_prediction": round(ml_prediction, 4),
@@ -603,7 +632,10 @@ def update_dashboard(processed_signals: Dict[str, Any], prediction_history: Dict
             "entry_price": round(entry_price, 4) if entry_price else None,
             "stop_loss": round(stop_loss, 4) if stop_loss else None,
             "take_profit": round(take_profit, 4) if take_profit else None,
-            "position_size": round(pos_size, 2) if pos_size else None
+            "position_size": round(pos_size, 2) if pos_size else None,
+            "pivot": round(support_resistance["pivot"], 4) if support_resistance["pivot"] else None,
+            "support": round(support_resistance["support"], 4) if support_resistance["support"] else None,
+            "resistance": round(support_resistance["resistance"], 4) if support_resistance["resistance"] else None,
         }
     dashboard_data = new_data
 
@@ -613,10 +645,48 @@ def fetch_symbol_data(symbol: str, tf: str, session: requests.Session) -> Tuple[
         df = calculate_indicators(df)
     return symbol, tf, df
 
+# ======== Console Display Function ========
+def display_signals_console(data: Dict[str, Any]) -> None:
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    table = Table(title="Trading Signals (Terminal)")
+    table.add_column("Symbol", style="bold cyan")
+    table.add_column("Price", justify="right")
+    table.add_column("Signal", justify="right")
+    table.add_column("ML Prediction", justify="right")
+    table.add_column("ATR", justify="right")
+    table.add_column("Entry Price", justify="right")
+    table.add_column("Stop Loss", justify="right")
+    table.add_column("Take Profit", justify="right")
+    table.add_column("Position Size", justify="right")
+    table.add_column("Pivot", justify="right")
+    table.add_column("Support", justify="right")
+    table.add_column("Resistance", justify="right")
+    
+    for symbol, info in data.items():
+        ml_pred = info.get("ml_prediction")
+        ml_str = f"{ml_pred:.2%}" if ml_pred is not None else "N/A"
+        table.add_row(
+            symbol,
+            str(info.get("price", "N/A")),
+            str(info.get("signal", "N/A")),
+            ml_str,
+            str(info.get("atr", "N/A")),
+            str(info.get("entry_price", "N/A")),
+            str(info.get("stop_loss", "N/A")),
+            str(info.get("take_profit", "N/A")),
+            str(info.get("position_size", "N/A")),
+            str(info.get("pivot", "N/A")),
+            str(info.get("support", "N/A")),
+            str(info.get("resistance", "N/A"))
+        )
+    console.print(table)
+
 # ======== Main Execution ========
 def main() -> None:
     logger.info("🚀 Starting Trading Scanner")
-    session = requests.Session()  # Reuse HTTP connections
+    session = requests.Session()
     ml_models: Dict[str, Dict[str, Any]] = {}
     prediction_history: Dict[str, deque] = {symbol: deque(maxlen=10) for symbol in SYMBOLS}
 
@@ -670,11 +740,37 @@ def main() -> None:
                     logger.warning(f"Incomplete data for {symbol}. Skipping signal analysis.")
             
             print(f"\n[white]{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/white]")
-            display_signals(processed_signals, prediction_history)
+            # Display signals on terminal using Rich
             update_dashboard(processed_signals, prediction_history)
+            display_signals_console(dashboard_data)
             
-            # Optionally, update performance tracker (e.g., after a trade is completed)
-            # perf_tracker.add_trade(entry_time, exit_time, direction, entry_price, exit_price)
+            # --- Trade Simulation ---
+            for symbol in SYMBOLS:
+                sig = processed_signals.get(symbol, {}).get("signal", {})
+                if sig.get("long") or sig.get("short"):
+                    entry_price = sig.get("entry_price")
+                    stop_loss = sig.get("stop_loss")
+                    take_profit = sig.get("take_profit")
+                    if not entry_price or not stop_loss or not take_profit:
+                        continue
+                    if sig.get("long"):
+                        win_prob = sig.get("ml_prediction", 0.5)
+                        direction = "LONG"
+                    else:
+                        win_prob = 1 - sig.get("ml_prediction", 0.5)
+                        direction = "SHORT"
+                    r = random.random()
+                    if r < win_prob:
+                        exit_price = take_profit
+                        outcome = "win"
+                    else:
+                        exit_price = stop_loss
+                        outcome = "loss"
+                    trade_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    perf_tracker.add_trade(entry_time=trade_time, exit_time=trade_time, direction=direction, entry_price=entry_price, exit_price=exit_price)
+                    logger.info(f"Simulated {direction} trade for {symbol}: {outcome} | Entry: {entry_price}, Exit: {exit_price}")
+            
+            # Dashboard will automatically reflect updated equity curve via /api/equity
             
             if time.time() - last_retrain >= RETRAIN_INTERVAL:
                 logger.info("Retraining ML models...")
